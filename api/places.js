@@ -21,6 +21,24 @@ export default async function handler(req, res) {
     const center = { lat: 25.8009, lng: -80.1997 };
     const maxMeters = 1300; // ~0.8 mi cap
 
+    // --- SMALL OVERRIDE TABLE FOR EDGE CASES ---
+    // normalize names to lowercase w/o punctuation for matching
+    const CORRECTIONS = {
+      "dantes hifi": {
+        name: "Dante’s HiFi",
+        // Street-level address (Wynwood)
+        address: "519 NW 26th St, Miami, FL 33127",
+        website: "https://danteshifi.com"
+      }
+      // add more known fixes here if you ever need
+    };
+    const norm = s => (s || "")
+      .toLowerCase()
+      .normalize("NFKD")
+      .replace(/[’'`]/g,"")   // strip apostrophes/quotes
+      .replace(/[^a-z0-9]+/g," ") // collapse punctuation to spaces
+      .trim();
+
     // Haversine
     const toRad = d => d * Math.PI / 180;
     function distMeters(a, b) {
@@ -104,7 +122,7 @@ export default async function handler(req, res) {
         const meters = distMeters(center, { lat: geo.lat, lng: geo.lng });
         if (meters > maxMeters) continue;
 
-        // Build precise street address from components; fallback to reverse geocode
+        // Build precise street address
         let addr = buildStreetAddress(det.address_components);
         if (!addr || !/\d/.test(addr)) {
           const fallback = await reverseStreet(geo.lat, geo.lng);
@@ -112,7 +130,14 @@ export default async function handler(req, res) {
         }
         if (!addr) addr = det.formatted_address || ""; // last resort
 
-        enriched.push({
+        // --- APPLY OVERRIDE (e.g., Dante’s HiFi) ---
+        const key = norm(det.name);
+        if (CORRECTIONS[key]) {
+          const fix = CORRECTIONS[key];
+          if (fix.address) addr = fix.address;
+        }
+
+        const out = {
           name: det.name || p.name || "",
           address: addr,
           rating: det.rating ?? p.rating ?? null,
@@ -122,7 +147,12 @@ export default async function handler(req, res) {
           website: det.website || null,
           distance_m: Math.round(meters),
           distance_mi: +(meters / 1609.344).toFixed(2)
-        });
+        };
+
+        // If we have a website override, apply it too
+        if (CORRECTIONS[key]?.website) out.website = CORRECTIONS[key].website;
+
+        enriched.push(out);
 
         if (enriched.length >= limit) break;
       } catch { /* skip bad entries */ }
@@ -133,3 +163,4 @@ export default async function handler(req, res) {
     return res.status(200).json({ results: [], status: "ERROR", error: String(e) });
   }
 }
+
