@@ -1,6 +1,6 @@
 // File: api/places.js
 // POST body: { "query": "tacos", "type": "restaurant", "limit": 5 }
-// Needs env var: GOOGLE_MAPS_API_KEY  (and billing enabled)
+// Needs env var: GOOGLE_MAPS_API_KEY  (with Billing ON)
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", process.env.ALLOW_ORIGIN || "*");
@@ -21,6 +21,7 @@ export default async function handler(req, res) {
     const center = { lat: 25.8009, lng: -80.1997 };
     const maxMeters = 1300; // ~0.8 mi cap
 
+    // Haversine
     const toRad = d => d * Math.PI / 180;
     function distMeters(a, b) {
       const R = 6371000;
@@ -32,11 +33,12 @@ export default async function handler(req, res) {
       return 2 * R * Math.asin(Math.sqrt(x));
     }
 
+    // Bias the search to Wynwood specifically
     const search = (query && query.trim())
       ? `${query.trim()} in Wynwood Miami`
       : (type ? `${type} in Wynwood Miami` : "Wynwood Miami");
 
-    // 1) TEXT SEARCH (better topical matching)
+    // 1) Text Search (topical) + open now
     const tsParams = new URLSearchParams({
       key: API_KEY,
       query: search,
@@ -46,32 +48,29 @@ export default async function handler(req, res) {
       region: "us"
     });
     if (type) tsParams.set("type", type);
-    const textURL = `https://maps.googleapis.com/maps/api/place/textsearch/json?${tsParams.toString()}`;
 
+    const textURL = `https://maps.googleapis.com/maps/api/place/textsearch/json?${tsParams.toString()}`;
     const tsr = await fetch(textURL);
     const tsj = await tsr.json();
     if (tsj.status !== "OK" && tsj.status !== "ZERO_RESULTS") {
       return res.status(200).json({ results: [], status: tsj.status || "ERROR", error_message: tsj.error_message || null });
     }
 
-    const candidates = (tsj.results || [])
-      .slice(0, Math.max(limit * 3, 12)); // overfetch; we will filter
+    const candidates = (tsj.results || []).slice(0, Math.max(limit * 3, 12));
 
-    // helper to build street address from components
+    // helpers
     function buildStreetAddress(components) {
       if (!components) return "";
       const get = (t) => (components.find(c => c.types.includes(t)) || {}).long_name || "";
       const streetNum = get("street_number");
-      const route = get("route");
-      const city = get("locality") || get("sublocality") || get("postal_town") || "Miami";
-      const state = get("administrative_area_level_1") || "FL";
-      const zip = get("postal_code") || "";
-      const street = [streetNum, route].filter(Boolean).join(" ");
-      const line2 = [city, state].filter(Boolean).join(", ") + (zip ? ` ${zip}` : "");
+      const route     = get("route");
+      const city      = get("locality") || get("sublocality") || get("postal_town") || "Miami";
+      const state     = get("administrative_area_level_1") || "FL";
+      const zip       = get("postal_code") || "";
+      const street    = [streetNum, route].filter(Boolean).join(" ");
+      const line2     = [city, state].filter(Boolean).join(", ") + (zip ? ` ${zip}` : "");
       return street && line2 ? `${street}, ${line2}` : (route ? `${route}, ${line2}` : line2);
     }
-
-    // 2) DETAILS per result (address_components), 3) reverse geocode fallback
     async function detailsFor(place_id) {
       const fields = [
         "name","business_status","place_id","rating","user_ratings_total",
@@ -82,7 +81,6 @@ export default async function handler(req, res) {
       const dj = await dr.json();
       return dj?.result || null;
     }
-
     async function reverseStreet(lat, lng) {
       const rgURL = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${API_KEY}&result_type=street_address`;
       const rr = await fetch(rgURL);
@@ -106,10 +104,9 @@ export default async function handler(req, res) {
         const meters = distMeters(center, { lat: geo.lat, lng: geo.lng });
         if (meters > maxMeters) continue;
 
-        // Build precise street address
+        // Build precise street address from components; fallback to reverse geocode
         let addr = buildStreetAddress(det.address_components);
         if (!addr || !/\d/.test(addr)) {
-          // fallback if no street number
           const fallback = await reverseStreet(geo.lat, geo.lng);
           if (fallback) addr = fallback;
         }
@@ -128,7 +125,7 @@ export default async function handler(req, res) {
         });
 
         if (enriched.length >= limit) break;
-      } catch { /* skip */ }
+      } catch { /* skip bad entries */ }
     }
 
     return res.status(200).json({ results: enriched, status: "OK" });
